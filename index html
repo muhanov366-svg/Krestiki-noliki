@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Крестики-нолики онлайн</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: 'Segoe UI', Tahoma, sans-serif;
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    min-height: 100vh;
+    display: flex; justify-content: center; align-items: center;
+    padding: 20px;
+  }
+  .container {
+    background: #fff; border-radius: 20px; padding: 30px;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+    max-width: 450px; width: 100%; text-align: center;
+  }
+  h1 { color: #333; margin-bottom: 15px; font-size: 26px; }
+
+  .screen { display: none; }
+  .screen.active { display: block; }
+
+  .status {
+    font-size: 18px; font-weight: 600; margin-bottom: 20px;
+    padding: 12px; border-radius: 10px; background: #f0f2f5;
+    color: #555; min-height: 48px; display: flex;
+    align-items: center; justify-content: center;
+  }
+  .status.win { background: #d4edda; color: #155724; }
+  .status.draw { background: #fff3cd; color: #856404; }
+  .status.error { background: #f8d7da; color: #721c24; }
+
+  .board {
+    display: grid; grid-template-columns: repeat(3, 1fr);
+    gap: 10px; margin-bottom: 20px;
+  }
+  .cell {
+    aspect-ratio: 1; background: #f0f2f5; border: none;
+    border-radius: 12px; font-size: 60px; font-weight: bold;
+    cursor: pointer; transition: all 0.2s; color: #333;
+    display: flex; align-items: center; justify-content: center;
+    font-family: inherit;
+  }
+  .cell:hover:not(.disabled) { background: #e0e4e9; }
+  .cell.X { color: #e74c3c; }
+  .cell.O { color: #3498db; }
+  .cell.winning { background: #ffe066; }
+  .cell.disabled { cursor: not-allowed; }
+
+  .btn {
+    width: 100%; padding: 14px; font-size: 16px; font-weight: 600;
+    border: none; border-radius: 12px;
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: #fff; cursor: pointer; transition: all 0.3s;
+    margin-top: 10px;
+  }
+  .btn:hover { transform: translateY(-2px); box-shadow: 0 8px 20px rgba(102,126,234,0.4); }
+  .btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+  .btn.secondary { background: #e0e4e9; color: #333; }
+
+  input[type="text"] {
+    width: 100%; padding: 14px; font-size: 20px;
+    text-align: center; border: 2px solid #e0e4e9;
+    border-radius: 12px; margin-bottom: 15px;
+    font-family: monospace; letter-spacing: 4px;
+    text-transform: uppercase;
+  }
+  input[type="text"]:focus { outline: none; border-color: #667eea; }
+
+  .room-code {
+    font-size: 36px; font-weight: bold; font-family: monospace;
+    letter-spacing: 8px; color: #764ba2;
+    background: #f0f2f5; padding: 15px; border-radius: 12px;
+    margin: 15px 0; user-select: all;
+  }
+  .hint { font-size: 14px; color: #888; margin-bottom: 15px; }
+</style>
+</head>
+<body>
+  <div class="container">
+    <h1>Крестики-нолики онлайн</h1>
+
+    <!-- Экран лобби -->
+    <div id="lobbyScreen" class="screen active">
+      <button class="btn" id="createBtn">Создать комнату</button>
+      <div class="hint" style="margin: 15px 0;">или</div>
+      <input type="text" id="roomInput" placeholder="КОД КОМНАТЫ" maxlength="6">
+      <button class="btn secondary" id="joinBtn">Присоединиться</button>
+      <div id="lobbyStatus" class="status" style="margin-top: 15px; display: none;"></div>
+    </div>
+
+    <!-- Экран ожидания (хост) -->
+    <div id="waitScreen" class="screen">
+      <p class="hint">Поделитесь кодом с другом:</p>
+      <div class="room-code" id="myRoomCode">------</div>
+      <button class="btn secondary" id="copyBtn">Скопировать код</button>
+      <div id="waitStatus" class="status" style="margin-top: 15px;">Ожидание подключения...</div>
+    </div>
+
+    <!-- Игровой экран -->
+    <div id="gameScreen" class="screen">
+      <div class="status" id="gameStatus">Ход игрока X</div>
+      <div class="board" id="board"></div>
+      <button class="btn secondary" id="leaveBtn">Выйти</button>
+    </div>
+  </div>
+
+  <!-- PeerJS -->
+  <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+  <script>
+    // ===== ИГРОВАЯ ЛОГИКА =====
+    const WIN_LINES = [
+      [0,1,2],[3,4,5],[6,7,8],
+      [0,3,6],[1,4,7],[2,5,8],
+      [0,4,8],[2,4,6]
+    ];
+
+    const boardEl = document.getElementById('board');
+    const gameStatusEl = document.getElementById('gameStatus');
+    const lobbyScreen = document.getElementById('lobbyScreen');
+    const waitScreen = document.getElementById('waitScreen');
+    const gameScreen = document.getElementById('gameScreen');
+
+    let board = Array(9).fill('');
+    let gameOver = false;
+    let mySymbol = null;   // 'X' или 'O'
+    let myTurn = false;
+
+    // ===== P2P =====
+    let peer = null;
+    let conn = null;
+    let roomCode = '';
+
+    function generateRoomCode() {
+      const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+      let code = '';
+      for (let i = 0; i < 6; i++) code += chars[Math.floor(Math.random() * chars.length)];
+      return code;
+    }
+
+    function showScreen(id) {
+      document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+      document.getElementById(id).classList.add('active');
+    }
+
+    // ===== СОЗДАНИЕ КОМНАТЫ (ХОСТ) =====
+    document.getElementById('createBtn').addEventListener('click', () => {
+      roomCode = generateRoomCode();
+      document.getElementById('myRoomCode').textContent = roomCode;
+      showScreen('waitScreen');
+
+      // PeerJS ID = префикс + код комнаты, чтобы другие могли найти хоста
+      peer = new Peer('tictactoe-' + roomCode, { debug: 1 });
+
+      peer.on('open', () => {
+        document.getElementById('waitStatus').textContent = 'Ожидание подключения...';
+      });
+
+      peer.on('error', (err) => {
+        console.error(err);
+        if (err.type === 'unavailable-id') {
+          // Коллизия кода — генерируем заново
+          peer.destroy();
+          document.getElementById('createBtn').click();
+        }
+      });
+
+      peer.on('connection', (connection) => {
+        if (conn) { connection.close(); return; } // только 2 игрока
+        conn = connection;
+        mySymbol = 'X';
+        myTurn = true;
+        setupConnection();
+      });
+    });
+
+    // ===== ПРИСОЕДИНЕНИЕ К КОМНАТЕ =====
+    document.getElementById('joinBtn').addEventListener('click', () => {
+      const code = document.getElementById('roomInput').value.trim().toUpperCase();
+      if (code.length !== 6) {
+        showLobbyStatus('Введите 6-значный код', 'error');
+        return;
+      }
+
+      showLobbyStatus('Подключение...', '');
+
+      peer = new Peer({ debug: 1 });
+
+      peer.on('open', () => {
+        conn = peer.connect('tictactoe-' + code, { reliable: true });
+
+        const timeout = setTimeout(() => {
+          showLobbyStatus('Не удалось подключиться. Проверьте код.', 'error');
+          peer.destroy();
+        }, 15000);
+
+        conn.on('open', () => {
+          clearTimeout(timeout);
+          mySymbol = 'O';
+          myTurn = false;
+          setupConnection();
+        });
+
+        conn.on('error', (err) => {
+          clearTimeout(timeout);
+          showLobbyStatus('Ошибка подключения: ' + err, 'error');
+        });
+      });
+
+      peer.on('error', (err) => {
+        console.error(err);
+        showLobbyStatus('Ошибка: ' + err.type, 'error');
+      });
+    });
+
+    function showLobbyStatus(msg, type) {
+      const el = document.getElementById('lobbyStatus');
+      el.textContent = msg;
+      el.className = 'status ' + type;
+      el.style.display = 'flex';
+    }
+
+    // ===== НАСТРОЙКА СОЕДИНЕНИЯ =====
+    function setupConnection() {
+      conn.on('data', (data) => {
+        if (data.type === 'move') {
+          applyMove(data.index);
+        } else if (data.type === 'reset') {
+          resetBoard();
+          myTurn = (mySymbol === 'X');
+          updateStatus();
+        }
+      });
+
+      conn.on('close', () => {
+        gameStatusEl.textContent = 'Соперник отключился';
+        gameStatusEl.className = 'status error';
+      });
+
+      // Инициализация игры
+      showScreen('gameScreen');
+      createBoard();
+      resetBoard();
+      updateStatus();
+    }
+
+    // ===== ИГРОВАЯ ЛОГИКА =====
+    function createBoard() {
+      boardEl.innerHTML = '';
+      for (let i = 0; i < 9; i++) {
+        const cell = document.createElement('button');
+        cell.className = 'cell';
+        cell.addEventListener('click', () => handleClick(i));
+        boardEl.appendChild(cell);
+      }
+    }
+
+    function handleClick(index) {
+      if (gameOver || board[index] !== '' || !myTurn) return;
+
+      // Отправляем ход сопернику
+      if (conn && conn.open) {
+        conn.send({ type: 'move', index });
+      }
+      applyMove(index);
+    }
+
+    function applyMove(index) {
+      if (board[index] !== '' || gameOver) return;
+
+      board[index] = myTurn ? mySymbol : (mySymbol === 'X' ? 'O' : 'X');
+      const cell = boardEl.children[index];
+      cell.textContent = board[index];
+      cell.classList.add(board[index], 'disabled');
+
+      const win = checkWin();
+      if (win) {
+        gameOver = true;
+        win.forEach(i => boardEl.children[i].classList.add('winning'));
+        const winner = board[win[0]];
+        gameStatusEl.textContent = winner === mySymbol ? 'Вы победили! 🎉' : 'Вы проиграли 😔';
+        gameStatusEl.className = 'status win';
+        myTurn = false;
+        return;
+      }
+
+      if (board.every(c => c !== '')) {
+        gameOver = true;
+        gameStatusEl.textContent = 'Ничья! 🤝';
+        gameStatusEl.className = 'status draw';
+        myTurn = false;
+        return;
+      }
+
+      myTurn = !myTurn;
+      updateStatus();
+    }
+
+    function checkWin() {
+      for (const line of WIN_LINES) {
+        const [a,b,c] = line;
+        if (board[a] && board[a] === board[b] && board[a] === board[c]) return line;
+      }
+      return null;
+    }
+
+    function resetBoard() {
+      board = Array(9).fill('');
+      gameOver = false;
+      boardEl.querySelectorAll('.cell').forEach(c => {
+        c.textContent = '';
+        c.className = 'cell';
+      });
+    }
+
+    function updateStatus() {
+      if (gameOver) return;
+      gameStatusEl.className = 'status';
+      if (myTurn) {
+        gameStatusEl.textContent = `Ваш ход (${mySymbol})`;
+      } else {
+        gameStatusEl.textContent = `Ход соперника (${mySymbol === 'X' ? 'O' : 'X'})`;
+      }
+    }
+
+    // ===== КОПИРОВАНИЕ КОДА =====
+    document.getElementById('copyBtn').addEventListener('click', () => {
+      navigator.clipboard.writeText(roomCode).then(() => {
+        document.getElementById('copyBtn').textContent = 'Скопировано!';
+        setTimeout(() => document.getElementById('copyBtn').textContent = 'Скопировать код', 2000);
+      });
+    });
+
+    // ===== ВЫХОД =====
+    document.getElementById('leaveBtn').addEventListener('click', () => {
+      if (conn) conn.close();
+      if (peer) peer.destroy();
+      conn = null; peer = null; mySymbol = null; myTurn = false;
+      showScreen('lobbyScreen');
+      document.getElementById('lobbyStatus').style.display = 'none';
+      document.getElementById('roomInput').value = '';
+    });
+  </script>
+</body>
+</html>
